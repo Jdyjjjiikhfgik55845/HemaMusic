@@ -1,4 +1,4 @@
-# Copyright (c) 2025 TheHamkerAlone
+# Copyright (c) 2025 TheHamkerAlone 
 # Licensed under the MIT License.
 # This file is part of AloneXMusic
 
@@ -15,7 +15,7 @@ from typing import Optional, Union
 from pyrogram import enums, types
 from py_yt import Playlist, VideosSearch
 
-from AloneX import logger
+from AloneX import config, logger
 from AloneX.helpers import Track, utils
 
 
@@ -125,6 +125,56 @@ class YouTube:
             pass
         return tracks
 
+    async def download_with_api(self, video_id: str, video: bool = False) -> Optional[str]:
+        """Download using external API"""
+        api_url = config.VIDEO_API_URL if video else config.API_URL
+        api_key = getattr(config, 'API_KEY', None)
+        
+        if not api_url or not api_key:
+            return None
+            
+        endpoint = f"{api_url}/{'video' if video else 'song'}/{video_id}?api={api_key}"
+        
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(10):
+                try:
+                    async with session.get(endpoint) as response:
+                        if response.status != 200:
+                            raise Exception(f"API request failed with status {response.status}")
+                        
+                        data = await response.json()
+                        status = data.get("status", "").lower()
+                        
+                        if status == "done":
+                            download_url = data.get("link")
+                            if not download_url:
+                                raise Exception("No download URL in API response")
+                                
+                            file_format = data.get("format", "mp4" if video else "mp3")
+                            file_path = f"downloads/{video_id}.{file_format}"
+                            
+                            async with session.get(download_url) as file_response:
+                                with open(file_path, 'wb') as f:
+                                    while True:
+                                        chunk = await file_response.content.read(8192)
+                                        if not chunk:
+                                            break
+                                        f.write(chunk)
+                            return file_path
+                            
+                        elif status == "downloading":
+                            await asyncio.sleep(4 if not video else 8)
+                        else:
+                            error_msg = data.get("error") or data.get("message") or f"Unexpected status '{status}'"
+                            raise Exception(f"API error: {error_msg}")
+                            
+                except Exception as e:
+                    logger.error(f"API download attempt {attempt + 1} failed: {e}")
+                    if attempt == 9:
+                        return None
+                    await asyncio.sleep(2)
+        return None
+
     async def download(self, video_id: str, video: bool = False) -> Optional[str]:
         url = self.base + video_id
         ext = "mp4" if video else "webm"
@@ -133,6 +183,16 @@ class YouTube:
         if Path(filename).exists():
             return filename
 
+        # Try API download first if configured
+        if hasattr(config, 'API_URL') and hasattr(config, 'API_KEY'):
+            try:
+                api_result = await self.download_with_api(video_id, video)
+                if api_result:
+                    return api_result
+            except Exception as e:
+                logger.error(f"API download failed, falling back to cookies: {e}")
+
+        # Fallback to cookie-based download
         cookie = self.get_cookies()
         base_opts = {
             "outtmpl": "downloads/%(id)s.%(ext)s",
@@ -162,7 +222,7 @@ class YouTube:
                 try:
                     ydl.download([url])
                 except (yt_dlp.utils.DownloadError, yt_dlp.utils.ExtractorError):
-                    if cookie in self.cookies:
+                    if cookie and cookie in self.cookies:
                         self.cookies.remove(cookie)
                     return None
                 except Exception as ex:
